@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+# Debootstrap script for CLIP secondary packages
+# Copyright 2006-2009 SGDN/DCSSI
+# Copyright 2009-2014 SGDSN/ANSSI
+# Author: Vincent Strubel <clipos@ssi.gouv.fr>
+
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License 
+# version 2 as published by the Free Software Foundation.
+
+mirror_style main
+download_style apt
+
+export BOOTSTRAP_NOVERIEXEC="yep"
+
+source /usr/lib/debootstrap/scripts/clip_common
+
+declare -a BIND_MOUNTS=(
+	"${TARGET}/mounts/usr ${TARGET}/update/usr/local"
+	"${TARGET}/mounts/viewers ${TARGET}/update/viewers"
+	"${TARGET}/mounts/update_priv/var ${TARGET}/update/var"
+	"${TARGET}/mounts/update_priv/dev ${TARGET}/update/dev"
+	"${TARGET}/mounts/user_root ${TARGET}/update/mounts/user_root"
+	"${TARGET}/mounts/audit_root ${TARGET}/update/mounts/audit_root"
+	"${TARGET}/mounts/admin_root ${TARGET}/update/mounts/admin_root"
+	"${TARGET}/mounts/admin_priv/etc.admin ${TARGET}/update/etc/admin"
+	"${TARGET}/etc/core ${TARGET}/update/etc/core"
+	"${TARGET}/etc/shared ${TARGET}/update/etc/shared"
+	"${TARGET}/var/pkg ${TARGET}/update/var/pkg"
+	"/proc ${TARGET}/update/proc"
+)
+
+add_fstab() {
+	local file="${1}"
+	local src="${2}"
+
+	local ifs="${IFS}"
+
+	declare -a fstab
+
+	IFS=$'\r\n' fstab=( $(cat "${file}") )
+	IFS="${ifs}"
+
+	for line in "${fstab[@]}"; do
+		BIND_MOUNTS+=( "$(echo ${line} | awk -vtarg="${TARGET}" -vsrc="${src}" '{print targ src $1" " targ "/update" $2}')" )
+	done
+}
+
+setup_extra_mounts() {
+	local extdir="${TARGET}/etc/jails/update/fstab.external.d"
+	local intdir="${TARGET}/etc/jails/update/fstab.internal.d"
+
+	for f in "${extdir}"/*; do
+		[[ -f "${f}" ]] || continue
+		info INSTBASE "Adding extra fstab: ${f}"
+		add_fstab "${f}" ""
+	done
+	for f in "${intdir}"/*; do
+		[[ -f "${f}" ]] || continue
+		info INSTBASE "Adding extra fstab: ${f}"
+		add_fstab "${f}" "/update"
+	done
+}
+
+do_umounts() {
+	local idx=$(( ${#BIND_MOUNTS[*]} - 1 ))
+	local mnt
+
+	for (( i=$idx; i >=0; i-- )); do
+		mnt="${BIND_MOUNTS[$i]}"
+		mnt="${mnt#* }"
+		umount "${mnt}"
+	done
+	umount "${TARGET}/update/tmp"
+	umount "${TARGET}/update/usr"
+	umount "${TARGET}/update/lib"
+	umount "${TARGET}/update"
+}
+
+do_mounts() {
+	mount --bind -o ro,nodev "${TARGET}/update_root" "${TARGET}/update"
+	mount --bind -o ro,nodev "${TARGET}/lib" "${TARGET}/update/lib"
+	mount --bind -o ro,nodev "${TARGET}/usr" "${TARGET}/update/usr"
+	mount -t tmpfs -o noexec,nodev,nosuid,mode=1777 "updatetmp" "${TARGET}/update/tmp" 
+
+	setup_extra_mounts
+	
+	for line in "${BIND_MOUNTS[@]}"; do
+		# Ignore gen-crypt related mount points. At this point in the
+		# installer, the source folders with the keys are not available yet.
+		if [[ ${line} == *gen-crypt* ]]; then
+			info INSTBASE "Skipped mounting: ${line}"
+		else
+			info INSTBASE "Mounting: ${line}"
+			mkdir -p "${line#* }"
+			mount --bind ${line}
+		fi
+	done
+
+	on_exit "do_umounts"
+}
+
+work_out_debs () {
+    work_out_confdebs
+}
+
+first_stage_install() {
+	true
+}
+
+second_stage_install() {
+    info INSTBASE "Mounting /update subtree"
+    do_mounts
+
+    info UNPACKBASE "Unpacking packages..."
+    exec 7>&1
+
+    smallyes '' | 
+    	(repeatn 5 in_target_failmsg UNPACK_REQ_FAIL_FIVE "Failure while unpacking packages. This will be attempted 5 times." "" \
+	 dpkg --root=/update --status-fd 8 --force-confold --unpack $(debfor $all_debs) 8>&1 1>&7 2>>"${DPKG_ERR_FILE}"|| echo EXITCODE $?) |
+	 dpkg_progress $baseprog $bases UNPACKBASE "Unpacking base system" UNPACKING
+
+    info CONFBASE "Configuring packages..."
+
+    smallyes '' | 
+    	(repeatn 5 in_target_failmsg CONF_REQ_FAIL "Failure while configuring required packages. This will be attempted 5 times." "" \
+	 dpkg --root=/update --status-fd 8 --configure --pending --force-configure-any 8>&1 1>&7 2>>"${DPKG_ERR_FILE}" || echo EXITCODE $?) |
+	 dpkg_progress $baseprog $bases CONFBASE "Configuring base system" CONFIGURING
+
+    info BASESUCCESS "Base system installed successfully."
+}

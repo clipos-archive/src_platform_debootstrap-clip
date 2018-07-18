@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+# Debootstrap script for CLIP core packages
+# Copyright 2006-2009 SGDN/DCSSI
+# Copyright 2009-2014 SGDSN/ANSSI
+# Author: Vincent Strubel <clipos@ssi.gouv.fr>
+
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License 
+# version 2 as published by the Free Software Foundation.
+
+mirror_style main
+download_style apt
+
+export BOOTSTRAP_NOVERIEXEC="yep"
+
+source /usr/lib/debootstrap/scripts/clip_common
+
+declare -a core=( 
+	"glibc"
+	"dpkg"
+	"tar"
+	"ncurses"
+	"zlib"
+	"bzip2"
+	"coreutils"
+	"bash"
+	"readline"
+	"timezone-data"
+	"e2fsprogs-libs"
+	"e2fsprogs"
+	"debianutils"
+	"util-linux"
+	"hashalot"
+	"diffutils"
+	"gawk"
+	"sed"
+	"findutils"
+	"baselayout-clip"
+	"perl"
+	"timedate"
+	"gcc-lib"
+	"xz-utils-core"
+)
+
+work_out_debs () {
+    work_out_confdebs
+}
+
+first_stage_install () {
+    local admindir="${TARGET}/var/pkg/lib/dpkg"    
+
+    mkdir -p "${admindir}"
+    : >"${admindir}/status"
+    : >"${admindir}/available"
+
+    mkdir -p "$TARGET/proc"
+
+    local arch="$(dpkg --print-architecture)"
+
+    if [ "$arch" == "amd64" ]; then
+        mkdir -p "${TARGET}/lib64"
+        ln -s lib64 "${TARGET}/lib"
+        mkdir -p "${TARGET}/usr/lib64"
+        ln -s lib64 "${TARGET}/usr/lib"
+    fi
+
+    p () {
+        baseprog="$(($baseprog + ${1:-1}))"
+    }
+
+    x_feign_install () {
+        local pkg="$1"
+        local deb="$(debfor $pkg)"
+        local ver="$(extract_deb_field "$TARGET/$deb" Version)"
+
+        mkdir -p "${admindir}/info"
+
+        echo \
+"Package: $pkg
+Version: $ver
+Maintainer: unknown
+Description: fake install
+Architecture: ${arch}
+Status: install ok installed
+
+" >> "${admindir}/status"
+
+        touch "${admindir}/info/${pkg}.list"
+    }
+
+    extract "${core[@]}"
+    for _pkg in "${core[@]}"; do
+        x_feign_install $_pkg
+    done 
+}
+
+second_stage_install () {
+    x_core_install () {
+        smallyes '' | in_target dpkg --force-depends --install $(debfor "$@") 2>>"${DPKG_ERR_FILE}"
+    }
+
+    baseprog=0
+    bases=40
+
+    info INSTCORE "Installing core packages..."
+
+    x_core_install "${core[@]}" 2>/dev/null
+
+    info UNPACKBASE "Unpacking packages..."
+    exec 7>&1
+
+    smallyes '' | 
+        (repeatn 5 in_target_failmsg UNPACK_REQ_FAIL_FIVE "Failure while unpacking packages. This will be attempted 5 times." "" \
+     dpkg --status-fd 8 --force-depends --unpack $(debfor $all_debs) 8>&1 1>&7 2>>"${DPKG_ERR_FILE}" || echo EXITCODE $?) |
+     dpkg_progress $baseprog $bases UNPACKBASE "Unpacking base system" UNPACKING
+
+    info CONFBASE "Configuring packages..."
+
+
+    smallyes '' | 
+        (repeatn 5 in_target_failmsg CONF_REQ_FAIL "Failure while configuring required packages. This will be attempted 5 times." "" \
+     dpkg --status-fd 8 --configure --pending --force-configure-any 8>&1 1>&7 2>>"${DPKG_ERR_FILE}" || echo EXITCODE $?) |
+     dpkg_progress $baseprog $bases CONFBASE "Configuring base system" CONFIGURING
+
+    info BASESUCCESS "Base system installed successfully."
+}
